@@ -2,20 +2,18 @@ import { EventSource } from "eventsource";
 global.EventSource = EventSource as any;
 
 import PocketBase from "pocketbase";
-import { scrapeUser } from "./scraper";
+import { scrapeUser } from "./service/scraper";
 
-const pb = new PocketBase(
-  process.env.PUBLIC_PB_URL || "http://localhost:8090/"
-);
+const pb = new PocketBase(Bun.env.PUBLIC_PB_URL! || "http://localhost:8090/");
 pb.autoCancellation(false);
 
 // =======================
 // CONFIG
 // =======================
-const MAX_CONCURRENCY = 8;
-const HEARTBEAT_MS = 17000;
-const STALE_MS = 30_000;
-const MAX_RETRY = 3;
+const MAX_CONCURRENCY = Bun.env.CONCURRENCY! || 8;
+const HEARTBEAT_MS = Bun.env.HEARTBEAT! || 17000;
+const STALE_MS = Bun.env.STALE! || 30_000;
+const MAX_RETRY = Bun.env.RETRY! || 3;
 
 // =======================
 // STATE
@@ -37,7 +35,7 @@ function log(event: string, data: any = {}) {
       running,
       queue: jobQueue.length,
       ...data,
-    })
+    }),
   );
 }
 
