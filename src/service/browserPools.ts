@@ -5,7 +5,7 @@ let browser: Browser | null = null;
 export async function getBrowser(): Promise<Browser> {
   if (!browser) {
     browser = await chromium.launch({
-      headless: true,
+      headless: false,
       slowMo: 1700,
       args: [
         "--no-sandbox",

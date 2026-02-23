@@ -1,223 +1,186 @@
-import { EventSource } from "eventsource";
-global.EventSource = EventSource as any;
-
-import PocketBase from "pocketbase";
 import { scrapeUser } from "./service/scraper";
 
-const pb = new PocketBase(Bun.env.PUBLIC_PB_URL! || "http://localhost:8090/");
-pb.autoCancellation(false);
+type ClaimedJob = {
+  id: string;
+  nip: string;
+  nama?: string;
+  password: string;
+  retry?: number;
+};
 
-// =======================
-// CONFIG
-// =======================
-const MAX_CONCURRENCY = Bun.env.CONCURRENCY! || 8;
-const HEARTBEAT_MS = Bun.env.HEARTBEAT! || 17000;
-const STALE_MS = Bun.env.STALE! || 30_000;
-const MAX_RETRY = Bun.env.RETRY! || 3;
+type ClaimResponse = {
+  job: ClaimedJob | null;
+};
 
-// =======================
-// STATE
-// =======================
+const API_BASE = Bun.env.API_BASE_URL || "http://localhost:8080";
+const WORKER_TOKEN = Bun.env.WORKER_TOKEN || "dev-worker-token";
+const WORKER_ID = Bun.env.WORKER_ID || `worker-${Math.random().toString(36).slice(2, 8)}`;
+
+function envInt(name: string, fallback: number): number {
+  const raw = Bun.env[name];
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+const MAX_CONCURRENCY = envInt("CONCURRENCY", 4);
+const HEARTBEAT_MS = envInt("HEARTBEAT", 17_000);
+const IDLE_POLL_MS = envInt("IDLE_POLL_MS", 1500);
+
 let running = 0;
-let draining = false;
 
-const jobQueue: any[] = [];
-const enqueuedJobs = new Set<string>();
-
-// =======================
-// UTILS
-// =======================
-function log(event: string, data: any = {}) {
+function log(event: string, data: Record<string, unknown> = {}) {
   console.log(
     JSON.stringify({
       ts: new Date().toISOString(),
       event,
       running,
-      queue: jobQueue.length,
+      workerId: WORKER_ID,
       ...data,
     }),
   );
 }
 
-// =======================
-// STALE JOB RECOVERY
-// =======================
-async function recoverStaleJobs() {
-  log("recovery_start");
-
-  const stale = await pb.collection("pusaka").getFullList({
-    filter: "status='running'",
+async function api(path: string, init: RequestInit = {}) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Worker-Token": WORKER_TOKEN,
+      ...(init.headers || {}),
+    },
   });
 
-  const now = Date.now();
-
-  for (const job of stale) {
-    const hb = job.heartbeat ? new Date(job.heartbeat).getTime() : 0;
-    if (now - hb > STALE_MS) {
-      await pb.collection("pusaka").update(job.id, {
-        status: "pending",
-        error: "Recovered from stale worker",
-      });
-      log("recovered_job", { jobId: job.id, nip: job.nip });
-    }
+  if (!res.ok && res.status !== 204) {
+    const body = await res.text();
+    throw new Error(`API ${path} failed (${res.status}): ${body}`);
   }
+
+  if (res.status === 204) return null;
+  return res.json();
 }
 
-// =======================
-// HEARTBEAT
-// =======================
-function startHeartbeat(job: any) {
-  let lastProgress = Date.now();
+async function claimJob(): Promise<ClaimedJob | null> {
+  const body = (await api("/api/v1/worker/jobs/claim", {
+    method: "POST",
+    body: JSON.stringify({ worker_id: WORKER_ID, capacity: Math.max(1, MAX_CONCURRENCY - running) }),
+  })) as ClaimResponse;
 
-  const markProgress = () => {
-    lastProgress = Date.now();
-  };
+  return body.job;
+}
+
+async function runJob(job: ClaimedJob) {
+  const start = Date.now();
+  let lastProgress = Date.now();
+  let timer: ReturnType<typeof setInterval> | null = null;
 
   const sendHeartbeat = async () => {
-    try {
-      await pb.collection("pusaka").update(job.id, {
-        heartbeat: new Date().toISOString(),
-        progress_age_ms: Date.now() - lastProgress,
-      });
-    } catch {}
+    await api(`/api/v1/worker/jobs/${job.id}/heartbeat`, {
+      method: "POST",
+      body: JSON.stringify({ progress_age_ms: Date.now() - lastProgress }),
+    });
   };
-
-  sendHeartbeat();
-  const interval = setInterval(sendHeartbeat, HEARTBEAT_MS);
-
-  return {
-    markProgress,
-    stop: () => clearInterval(interval),
-  };
-}
-
-// =======================
-// JOB HANDLER
-// =======================
-async function handleJob(job: any) {
-  const start = Date.now();
-  log("job_start", { jobId: job.id, nip: job.nip });
-
-  await pb.collection("pusaka").update(job.id, { status: "running" });
-
-  const hb = startHeartbeat(job);
 
   try {
-    const res = await scrapeUser({
+    log("job_start", { jobId: job.id, nip: job.nip });
+    await sendHeartbeat();
+    timer = setInterval(() => {
+      sendHeartbeat().catch((err) => {
+        log("heartbeat_error", { jobId: job.id, error: err.message });
+      });
+    }, HEARTBEAT_MS);
+
+    const result = await scrapeUser({
       nip: job.nip,
       password: job.password,
-      onProgress: hb.markProgress,
+      onProgress: () => {
+        lastProgress = Date.now();
+      },
     });
 
-    if (res.status !== "OK") {
-      throw res;
+    if (result.status === "OK") {
+      await api(`/api/v1/worker/jobs/${job.id}/success`, {
+        method: "POST",
+        body: JSON.stringify({
+          tanggal: result.tanggal || "",
+          jam_masuk: result.jamMasuk || "",
+          jam_pulang: result.jamPulang || "",
+          duration_ms: Date.now() - start,
+        }),
+      });
+
+      log("job_success", { jobId: job.id, nip: job.nip });
+      return;
     }
 
-    await pb.collection("pusaka").update(job.id, {
-      nip: res.nip,
-      nama: job.nama || "",
-      tanggal: res.tanggal || "",
-      jam_masuk: res.jamMasuk || "",
-      jam_pulang: res.jamPulang || "",
-      status: "success",
-      error: "",
-      duration_ms: Date.now() - start,
+    const retryable = ["TIMEOUT", "SELECTOR"].includes(result.errorType);
+    await api(`/api/v1/worker/jobs/${job.id}/fail`, {
+      method: "POST",
+      body: JSON.stringify({
+        error_type: result.errorType,
+        error_message: result.error,
+        duration_ms: Date.now() - start,
+        retryable,
+      }),
     });
 
-    log("job_success", { jobId: job.id, nip: job.nip });
+    log("job_failed", {
+      jobId: job.id,
+      nip: job.nip,
+      errorType: result.errorType,
+      retryable,
+    });
   } catch (err: any) {
-    const retry = (job.retry ?? 0) + 1;
-    const retryable = ["TIMEOUT", "SELECTOR"].includes(err?.errorType) ?? false;
-
-    await pb.collection("pusaka").update(job.id, {
-      status: retry >= MAX_RETRY || !retryable ? "failed" : "pending",
-      retry,
-      error: err?.error || err?.message || "Unknown error",
-      duration_ms: Date.now() - start,
-    });
+    try {
+      await api(`/api/v1/worker/jobs/${job.id}/fail`, {
+        method: "POST",
+        body: JSON.stringify({
+          error_type: "WORKER_ERROR",
+          error_message: err?.message || "unknown worker error",
+          duration_ms: Date.now() - start,
+          retryable: true,
+        }),
+      });
+    } catch {}
 
     log("job_error", {
       jobId: job.id,
       nip: job.nip,
-      retry,
-      error: err?.errorType || err?.message,
+      error: err?.message || "unknown",
     });
   } finally {
-    hb.stop();
-    enqueuedJobs.delete(job.id);
+    if (timer) clearInterval(timer);
   }
 }
 
-// =======================
-// QUEUE DRAIN LOOP
-// =======================
-async function processQueue() {
-  if (draining) return;
-  draining = true;
+async function loop() {
+  while (true) {
+    try {
+      if (running >= MAX_CONCURRENCY) {
+        await Bun.sleep(250);
+        continue;
+      }
 
-  try {
-    while (running < MAX_CONCURRENCY && jobQueue.length > 0) {
-      const job = jobQueue.shift();
-      if (!job) break;
+      const job = await claimJob();
+      if (!job) {
+        await Bun.sleep(IDLE_POLL_MS);
+        continue;
+      }
 
       running++;
-
-      handleJob(job)
-        .catch(() => {})
+      runJob(job)
+        .catch((err) => {
+          log("run_job_crash", { error: err.message });
+        })
         .finally(() => {
           running--;
-          processQueue();
         });
+    } catch (err: any) {
+      log("poll_error", { error: err?.message || "unknown" });
+      await Bun.sleep(2000);
     }
-  } finally {
-    draining = false;
   }
 }
 
-// =======================
-// SSE SUBSCRIBE
-// =======================
-function subscribeJobs() {
-  log("sse_subscribe");
-
-  pb.collection("pusaka").subscribe("*", (e) => {
-    if (e.action !== "update") return;
-
-    const job = e.record;
-    if (job.status !== "pending") return;
-    if (enqueuedJobs.has(job.id)) return;
-
-    enqueuedJobs.add(job.id);
-    jobQueue.push(job);
-
-    // fairness: job retry kecil dulu
-    jobQueue.sort((a, b) => (a.retry ?? 0) - (b.retry ?? 0));
-
-    log("job_enqueued", { jobId: job.id, nip: job.nip });
-    processQueue();
-  });
-}
-
-// =======================
-// REALTIME START
-// =======================
-async function startRealtime() {
-  await recoverStaleJobs();
-  subscribeJobs();
-
-  pb.realtime.onDisconnect = () => {
-    log("sse_disconnect");
-    setTimeout(startRealtime, 2000);
-  };
-}
-
-// =======================
-// BOOTSTRAP
-// =======================
-console.log("🟢 Worker Orchestrator started");
-
-await pb
-  .collection("users")
-  .authWithPassword("199210282025211017", "qwerty1028");
-
-await startRealtime();
+log("worker_started", { apiBase: API_BASE, maxConcurrency: MAX_CONCURRENCY });
+await loop();

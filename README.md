@@ -1,206 +1,111 @@
-# 📘 Pusaka Presence Scraper
+# Pusaka Stack (Custom Backend + Frontend + Worker)
 
-**Runtime:** Bun  
-**Architecture:** Event-driven Scraper Orchestrator (PocketBase + Playwright)  
-**Status:** Production-ready (single worker)
+Monorepo ini sekarang terdiri dari 3 komponen utama:
 
----
+- `backend/`: API + job orchestration (`Go + Fiber + SQLite + JWT`)
+- `frontend/`: dashboard admin (`SvelteKit`)
+- `src/`: worker scraper (`Bun + Playwright`) yang claim job dari backend
 
-## 1. Overview
+## Arsitektur
 
-Pusaka Presence Scraper adalah sistem **scraper presensi berbasis event (SSE)** untuk mengambil data presensi harian dari sistem **Pusaka Kemenag** secara:
-
-- Stabil
-- Aman dari race condition
-- Tahan UI change minor
-- Siap jalan 24/7
-
-Sistem ini **tidak menggunakan polling**, melainkan **PocketBase Realtime (SSE)** sebagai job trigger.
-
----
-
-## 2. High-Level Architecture
-
-```
-[ PocketBase (jobs) ]
-          │
-          │  SSE (realtime update)
-          ▼
-[ Orchestrator (Bun) ]
-          │
-          │  Queue + Concurrency
-          ▼
-[ Scraper Worker ]
-          │
-          ▼
-[ Browser Pool (Playwright) ]
+```text
+[SvelteKit Dashboard] ---> [Go Backend API + SQLite] <--- [Worker TS Playwright]
+                                  |                          |
+                                  |<-- claim/heartbeat ------|
 ```
 
----
+## 1) Backend (Go)
 
-## 3. Components
+### Environment
 
-### 3.1 Orchestrator
-
-- Subscribe SSE PocketBase
-- Queue in-memory
-- Concurrency control
-- Heartbeat & recovery
-- Retry logic
-- Job deduplication
-
-### 3.2 Scraper v1.5
-
-- Playwright + Chromium
-- Stealth mode
-- Human-like delay
-- Session persistence
-- Error classification
-- Progress callback (`onProgress`)
-
----
-
-## 4. Runtime Requirements
-
-| Dependency | Version            |
-| ---------- | ------------------ |
-| Bun        | >= 1.0             |
-| Playwright | Latest             |
-| PocketBase | >= 0.22            |
-| Chromium   | Playwright bundled |
-
----
-
-## 5. Installation
-
-### 5.1 Install Bun
+Buat environment berikut sebelum menjalankan backend:
 
 ```bash
-curl -fsSL https://bun.sh/install | bash
+APP_ADDR=:8080
+DB_PATH=./data/pusaka.db
+JWT_SECRET=change-this-jwt-secret
+ENC_KEY=0123456789abcdef0123456789abcdef
+WORKER_TOKEN=change-this-worker-token
+ACCESS_TTL_MIN=60
+REFRESH_TTL_DAYS=14
+ADMIN_USER=admin
+ADMIN_PASSWORD=admin123
 ```
 
-### 5.2 Install Dependencies
+`ENC_KEY` harus 32 karakter (AES-256 key).
+
+### Run
+
+```bash
+cd backend
+go run ./cmd/server
+```
+
+API utama:
+
+- `POST /api/v1/auth/login`
+- `POST /api/v1/auth/refresh`
+- `POST /api/v1/auth/logout`
+- `GET /api/v1/admin/jobs`
+- `GET /api/v1/admin/jobs/stats`
+- `GET /api/v1/admin/jobs/:id`
+- `POST /api/v1/admin/jobs`
+- `POST /api/v1/admin/jobs/:id/retry`
+- `GET /api/v1/admin/targets`
+- `GET /api/v1/admin/targets/:id`
+- `POST /api/v1/admin/targets`
+- `PUT /api/v1/admin/targets/:id`
+- `DELETE /api/v1/admin/targets/:id`
+- `POST /api/v1/admin/targets/:id/enqueue`
+- `POST /api/v1/worker/jobs/claim`
+- `POST /api/v1/worker/jobs/:id/heartbeat`
+- `POST /api/v1/worker/jobs/:id/success`
+- `POST /api/v1/worker/jobs/:id/fail`
+
+## 2) Worker (Bun + Playwright)
+
+Worker membaca job dari backend, menjalankan scraper, lalu report hasil.
+
+### Environment
+
+```bash
+API_BASE_URL=http://localhost:8080
+WORKER_TOKEN=change-this-worker-token
+WORKER_ID=worker-1
+CONCURRENCY=4
+HEARTBEAT=17000
+IDLE_POLL_MS=1500
+```
+
+### Run
 
 ```bash
 bun install
+bun run worker:start
 ```
 
-### 5.3 Install Playwright Browser
+## 3) Frontend (SvelteKit)
+
+### Environment
 
 ```bash
-bunx playwright install chromium
+VITE_API_BASE_URL=http://localhost:8080
 ```
 
----
-
-## 6. Project Structure
-
-```
-.
-├── orchestrator.ts        # SSE worker & queue
-├── scraper.ts             # Scraper v1.5
-├── browserPools.ts        # Shared browser instance
-├── state/                 # Login session per user
-├── locks/                 # Optional user lock
-└── README.md
-```
-
----
-
-## 7. Running the Worker
+### Run
 
 ```bash
-bun run orchestrator.ts
+cd frontend
+npm install
+npm run dev
 ```
 
----
+## Catatan Migrasi dari PocketBase
 
-## 8. Concurrency & Performance
-
-| Setting            | Default |
-| ------------------ | ------- |
-| Max concurrency    | 8       |
-| Retry per job      | 3       |
-| Heartbeat interval | 5s      |
-| Stale recovery     | 30s     |
-
----
-
-## 9. Job Lifecycle
-
-```
-pending → running → success
-              ↘
-               failed
-```
-
----
-
-## 10. Error Handling Strategy
-
-| Error Type   | Retry |
-| ------------ | ----- |
-| TIMEOUT      | ✅    |
-| SELECTOR     | ✅    |
-| LOGIN_FAILED | ❌    |
-| BLOCKED      | ❌    |
-| UNKNOWN      | ❌    |
-
----
-
-## 11. PocketBase Collection: `pusaka`
-
-| Field           | Type     | Description                          |
-| --------------- | -------- | ------------------------------------ |
-| nip             | string   | NIP user                             |
-| nama            | string   | Nama pegawai                         |
-| password        | string   | Password login                       |
-| tanggal         | string   | Tanggal presensi                     |
-| jam_masuk       | string   | Jam masuk                            |
-| jam_pulang      | string   | Jam pulang                           |
-| status          | enum     | pending / running / success / failed |
-| retry           | number   | Retry count                          |
-| error           | string   | Error message                        |
-| heartbeat       | datetime | Last heartbeat                       |
-| progress_age_ms | number   | Progress age                         |
-| duration_ms     | number   | Execution duration                   |
-
----
-
-## 12. Heartbeat & Monitoring
-
-Monitoring rule:
-
-- `progress_age_ms > 30000` → job dianggap **stuck**
-
----
-
-## 13. Scraper API (Internal)
-
-```ts
-scrapeUser({
-  nip: string;
-  password: string;
-  onProgress?: () => void;
-})
-```
-
----
-
-## 14. Bun Runtime Notes
-
-- Bun menjalankan TypeScript tanpa transpile
-- SSE membutuhkan polyfill EventSource
-
----
-
-## 15. Operational Best Practices
-
-- Jalankan sebagai service
-- Backup folder `state/`
-- Monitor heartbeat
-- Jangan share satu akun di banyak worker
-
----
-
-**End of README**
+- PocketBase tidak lagi dipakai untuk orchestration.
+- Data job sekarang disimpan di SQLite backend.
+- Scraper Playwright tetap dipakai (tanpa rewrite logic scraping).
+- Model deploy yang disasar: single VPS untuk MVP.
+- Satu NIP hanya boleh punya satu job aktif (`pending/running`) pada satu waktu.
+- Retry bersifat manual lewat endpoint/admin dashboard, tidak auto-retry saat gagal.
+- Proses scrape bersifat manual (enqueue oleh user), bukan auto-scheduled.

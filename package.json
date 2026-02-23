@@ -1,9 +1,10 @@
 {
-  "name": "pusaka_scraper",
-  "module": "index.ts",
+  "name": "pusaka-worker",
+  "module": "src/index.ts",
   "type": "module",
   "scripts": {
-    "dev": "bun --watch src/index.ts"
+    "worker:start": "bun src/index.ts",
+    "worker:dev": "bun --watch src/index.ts"
   },
   "private": true,
   "devDependencies": {
@@ -13,9 +14,7 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "eventsource": "^4.1.0",
     "playwright": "^1.57.0",
-    "pocketbase": "^0.26.5",
     "winston": "^3.19.0"
   }
 }
