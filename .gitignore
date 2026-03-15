@@ -38,3 +38,11 @@ backend/data
 frontend/node_modules
 frontend/.svelte-kit
 frontend/build
+data/*.db-shm
+data/*.db-wal
+node_modules/
+.svelte-kit/
+build/
+.env
+.env.local
+

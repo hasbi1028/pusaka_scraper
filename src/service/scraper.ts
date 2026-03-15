@@ -8,6 +8,7 @@ import { getBrowser } from "./browserPools";
 type ScrapeUserInput = {
   nip: string;
   password: string;
+  headless?: boolean;
   onProgress?: () => void;
 };
 
@@ -34,8 +35,18 @@ type ScrapeResult =
 // =======================
 // UTILS
 // =======================
-function log(nip: string, msg: string) {
-  console.log(`[${new Date().toISOString()}] [${nip}] ${msg}`);
+function log(nip: string, msg: string, data: Record<string, any> = {}) {
+  // Hanya tampilkan log ekstraksi sukses
+  if (msg.includes("extracted successfully")) {
+    const ts = new Date().toLocaleTimeString();
+    console.log(`[${ts}] [SUCCESS] ${nip} | Masuk: ${data.jamMasuk || '--:--'}, Pulang: ${data.jamPulang || '--:--'}`);
+  }
+}
+
+function logError(nip: string, msg: string, err: any) {
+  const ts = new Date().toLocaleTimeString();
+  const errMsg = err?.message || err || 'Unknown error';
+  console.error(`[${ts}] [FAILED]  ${nip} | ${msg}: ${errMsg}`);
 }
 
 async function humanDelay(min = 800, max = 2200) {
@@ -84,8 +95,8 @@ async function applyStealth(context: BrowserContext) {
 export async function scrapeUser(
   input: ScrapeUserInput
 ): Promise<ScrapeResult> {
-  const { nip, password, onProgress } = input;
-  const browser = await getBrowser();
+  const { nip, password, onProgress, headless = true } = input;
+  const browser = await getBrowser(headless);
   const statePath = `state/state-${nip}.json`;
 
   // Device fingerprint (semi-mobile)
@@ -132,6 +143,7 @@ export async function scrapeUser(
       nip
     );
     if (!ok) {
+      log(nip, "Goto presence page failed", { url: page.url() });
       return {
         status: "ERROR",
         nip,
@@ -148,11 +160,15 @@ export async function scrapeUser(
     // LOGIN (IF NEEDED)
     // =======================
     if (page.url().includes("/login")) {
-      log(nip, "Session expired, login ulang");
+      log(nip, "Session expired, performing re-login");
 
-      await page.fill('[name="email"]', nip);
+      if (!nip || !password) {
+        throw new Error("NIP atau Password kosong, tidak bisa login");
+      }
+
+      await page.fill('[name="email"]', String(nip));
       await humanDelay(300, 800);
-      await page.fill('[name="password"]', password);
+      await page.fill('[name="password"]', String(password));
       await humanDelay(300, 800);
       await page.click("button[type=submit]");
 
@@ -161,7 +177,9 @@ export async function scrapeUser(
           timeout: 20_000,
           waitUntil: "networkidle",
         });
-      } catch {
+        log(nip, "Login successful, saving session state");
+      } catch (e: any) {
+        logError(nip, "Login failed or blocked", e);
         return {
           status: "ERROR",
           nip,
@@ -189,6 +207,7 @@ export async function scrapeUser(
         await page.waitForLoadState("networkidle");
         await humanDelay();
 
+        log(nip, "Attempting to click Riwayat Presensi", { attempt: i + 1 });
         const btn = page
           .locator(
             "button:has-text('Riwayat Presensi'), a:has-text('Riwayat Presensi')"
@@ -198,14 +217,16 @@ export async function scrapeUser(
         await btn.click();
         await page.waitForSelector("div.bg-slate-50", { timeout: 15_000 });
         opened = true;
+        log(nip, "Riwayat Presensi opened successfully");
         break;
-      } catch (e) {
-        log(nip, `Retry klik Riwayat Presensi (${i + 1})`);
+      } catch (e: any) {
+        log(nip, "Retry clicking Riwayat Presensi", { attempt: i + 1, error: e.message });
         await page.reload({ waitUntil: "networkidle" });
       }
     }
 
     if (!opened) {
+      logError(nip, "Failed to open Riwayat Presensi after retries", null);
       return {
         status: "ERROR",
         nip,
@@ -219,6 +240,7 @@ export async function scrapeUser(
     // =======================
     // EXTRACT DATA
     // =======================
+    log(nip, "Extracting presence data from page");
     const box = page.locator("div.bg-slate-50").first();
 
     const tanggal =
@@ -238,8 +260,10 @@ export async function scrapeUser(
           .locator('div:has(p:has-text("Jam Pulang")) p.font-bold')
           .first()
           .textContent()
+          .catch(() => null)
       )?.trim() || null;
 
+    log(nip, "Data extracted successfully", { tanggal, jamMasuk, jamPulang });
     onProgress?.();
 
     return {
@@ -250,6 +274,7 @@ export async function scrapeUser(
       jamPulang,
     };
   } catch (e: any) {
+    logError(nip, "Uncaught scraping exception", e);
     return {
       status: "ERROR",
       nip,

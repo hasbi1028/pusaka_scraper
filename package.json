@@ -8,12 +8,14 @@
   },
   "private": true,
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@types/eventsource": "^1.1.15"
   },
   "peerDependencies": {
     "typescript": "^5"
   },
   "dependencies": {
+    "eventsource": "^4.1.0",
     "playwright": "^1.57.0",
     "winston": "^3.19.0"
   }

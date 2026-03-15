@@ -1,4 +1,5 @@
 import { scrapeUser } from "./service/scraper";
+import { EventSource } from "eventsource";
 
 type ClaimedJob = {
   id: string;
@@ -12,7 +13,7 @@ type ClaimResponse = {
   job: ClaimedJob | null;
 };
 
-const API_BASE = Bun.env.API_BASE_URL || "http://localhost:8080";
+const API_BASE = Bun.env.API_BASE_URL || "http://localhost:5173";
 const WORKER_TOKEN = Bun.env.WORKER_TOKEN || "dev-worker-token";
 const WORKER_ID = Bun.env.WORKER_ID || `worker-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -23,22 +24,26 @@ function envInt(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-const MAX_CONCURRENCY = envInt("CONCURRENCY", 4);
+let activeConcurrency = envInt("CONCURRENCY", 5);
 const HEARTBEAT_MS = envInt("HEARTBEAT", 17_000);
-const IDLE_POLL_MS = envInt("IDLE_POLL_MS", 1500);
 
 let running = 0;
 
 function log(event: string, data: Record<string, unknown> = {}) {
-  console.log(
-    JSON.stringify({
-      ts: new Date().toISOString(),
-      event,
-      running,
-      workerId: WORKER_ID,
-      ...data,
-    }),
-  );
+  const ts = new Date().toLocaleTimeString();
+  const active = `[Active: ${running}/${activeConcurrency}]`;
+  const jobId = data.jobId ? `| Job: ${String(data.jobId).slice(0, 6)}...` : '';
+  const nip = data.nip ? `| NIP: ${data.nip}` : '';
+  
+  console.log(`${active} [${ts}] ${event.toUpperCase().padEnd(12)} ${nip} ${jobId}`);
+}
+
+function logError(event: string, err: any, data: Record<string, unknown> = {}) {
+  const ts = new Date().toLocaleTimeString();
+  const active = `[Active: ${running}/${activeConcurrency}]`;
+  const msg = err?.message || err;
+  
+  console.error(`${active} [${ts}] ERROR: ${event.toUpperCase()} | ${msg}`);
 }
 
 async function api(path: string, init: RequestInit = {}) {
@@ -63,10 +68,22 @@ async function api(path: string, init: RequestInit = {}) {
 async function claimJob(): Promise<ClaimedJob | null> {
   const body = (await api("/api/v1/worker/jobs/claim", {
     method: "POST",
-    body: JSON.stringify({ worker_id: WORKER_ID, capacity: Math.max(1, MAX_CONCURRENCY - running) }),
+    body: JSON.stringify({ worker_id: WORKER_ID }),
   })) as ClaimResponse;
 
   return body.job;
+}
+
+async function getSettings(): Promise<{ headless: boolean, maxConcurrency: number }> {
+  try {
+    const res = await api("/api/v1/admin/settings");
+    return {
+      headless: !res.headedMode,
+      maxConcurrency: res.maxConcurrency || 5
+    };
+  } catch {
+    return { headless: true, maxConcurrency: 5 };
+  }
 }
 
 async function runJob(job: ClaimedJob) {
@@ -86,13 +103,18 @@ async function runJob(job: ClaimedJob) {
     await sendHeartbeat();
     timer = setInterval(() => {
       sendHeartbeat().catch((err) => {
-        log("heartbeat_error", { jobId: job.id, error: err.message });
+        logError("heartbeat_error", err, { jobId: job.id });
       });
     }, HEARTBEAT_MS);
+
+    // Ambil setting terbaru
+    const settings = await getSettings();
+    activeConcurrency = settings.maxConcurrency;
 
     const result = await scrapeUser({
       nip: job.nip,
       password: job.password,
+      headless: settings.headless,
       onProgress: () => {
         lastProgress = Date.now();
       },
@@ -110,77 +132,82 @@ async function runJob(job: ClaimedJob) {
       });
 
       log("job_success", { jobId: job.id, nip: job.nip });
-      return;
-    }
-
-    const retryable = ["TIMEOUT", "SELECTOR"].includes(result.errorType);
-    await api(`/api/v1/worker/jobs/${job.id}/fail`, {
-      method: "POST",
-      body: JSON.stringify({
-        error_type: result.errorType,
-        error_message: result.error,
-        duration_ms: Date.now() - start,
-        retryable,
-      }),
-    });
-
-    log("job_failed", {
-      jobId: job.id,
-      nip: job.nip,
-      errorType: result.errorType,
-      retryable,
-    });
-  } catch (err: any) {
-    try {
+    } else {
       await api(`/api/v1/worker/jobs/${job.id}/fail`, {
         method: "POST",
         body: JSON.stringify({
-          error_type: "WORKER_ERROR",
-          error_message: err?.message || "unknown worker error",
+          error_type: result.errorType,
+          error_message: result.error,
           duration_ms: Date.now() - start,
-          retryable: true,
         }),
       });
-    } catch {}
 
-    log("job_error", {
-      jobId: job.id,
-      nip: job.nip,
-      error: err?.message || "unknown",
-    });
+      log("job_failed", { jobId: job.id, nip: job.nip, errorType: result.errorType });
+    }
+  } catch (err: any) {
+    log("job_error", { jobId: job.id, nip: job.nip, error: err?.message || "unknown" });
   } finally {
     if (timer) clearInterval(timer);
+    running--;
+    processQueue();
   }
 }
 
-async function loop() {
-  while (true) {
-    try {
-      if (running >= MAX_CONCURRENCY) {
-        await Bun.sleep(250);
-        continue;
-      }
+async function processQueue() {
+  const settings = await getSettings();
+  activeConcurrency = settings.maxConcurrency;
 
-      const job = await claimJob();
-      if (!job) {
-        await Bun.sleep(IDLE_POLL_MS);
-        continue;
-      }
+  if (running >= activeConcurrency) {
+    log("queue_skip", { reason: "at_max_concurrency" });
+    return;
+  }
 
+  try {
+    const job = await claimJob();
+    if (job) {
+      log("job_claimed", { jobId: job.id, nip: job.nip });
       running++;
-      runJob(job)
-        .catch((err) => {
-          log("run_job_crash", { error: err.message });
-        })
-        .finally(() => {
-          running--;
-        });
-    } catch (err: any) {
-      log("poll_error", { error: err?.message || "unknown" });
-      await Bun.sleep(2000);
+      runJob(job);
+      if (running < activeConcurrency) {
+        processQueue();
+      }
+    } else {
+      log("queue_empty");
     }
+  } catch (err: any) {
+    logError("claim_error", err);
   }
 }
 
-log("worker_started", { apiBase: API_BASE, maxConcurrency: MAX_CONCURRENCY });
-await loop();
+function startSSE() {
+  const sseUrl = new URL(`${API_BASE}/api/v1/worker/jobs/stream`);
+  sseUrl.searchParams.set("token", WORKER_TOKEN);
+
+  log("sse_connecting", { url: sseUrl.toString() });
+  
+  const es = new EventSource(sseUrl.toString());
+
+  es.onopen = () => {
+    log("sse_open", { status: "connected" });
+  };
+
+  es.addEventListener("update", () => {
+    log("sse_update_received", { action: "checking_queue" });
+    processQueue();
+  });
+
+  es.addEventListener("connected", (e) => {
+    log("sse_event_connected", { data: e.data });
+    processQueue();
+  });
+
+  es.onerror = (err: any) => {
+    logError("sse_connection_error", err);
+  };
+}
+
+log("worker_started", { apiBase: API_BASE, maxConcurrency: activeConcurrency });
+
+setTimeout(startSSE, 3000);
+
+setInterval(processQueue, 5 * 60 * 1000);
