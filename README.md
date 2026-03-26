@@ -1,150 +1,102 @@
-# Pusaka Stack (Custom Backend + Frontend + Worker)
+# Pusaka Scraper (SvelteKit + Bun Worker)
 
-Monorepo ini sekarang terdiri dari 3 komponen utama:
+Aplikasi full-stack untuk manajemen dan otomatisasi scraping data kehadiran "Pusaka" dengan dashboard admin real-time.
 
-- `backend/`: API + job orchestration (`Go + Fiber + SQLite + JWT`)
-- `frontend/`: dashboard admin (`SvelteKit`)
-- `src/`: worker scraper (`Bun + Playwright`) yang claim job dari backend
+## Arsitektur Modern
 
-## Arsitektur
+- **Frontend & API**: SvelteKit (Node.js) + SQLite (`better-sqlite3`) + SSE (Server-Sent Events).
+- **Worker**: Bun + Playwright (untuk scraping headless/headed).
+- **Deployment**: Mendukung Phusion Passenger (Cloud Hosting/VPS).
 
 ```text
-[SvelteKit Dashboard] ---> [Go Backend API + SQLite] <--- [Worker TS Playwright]
-                                  |                          |
-                                  |<-- claim/heartbeat ------|
+[Browser User] <--> [SvelteKit API & UI] <--> [SQLite DB]
+                            ^
+                            | (HTTP/SSE)
+                            v
+                     [Bun Worker Scraper]
 ```
 
-## 1) Backend (Go)
+## Fitur Utama
 
-### Environment
+- ✅ **Full-Stack SvelteKit**: API dan Dashboard dalam satu aplikasi.
+- ✅ **Real-time Dashboard**: Pantau progress worker secara live via SSE.
+- ✅ **Screenshot Capture**: Worker otomatis mengambil bukti screenshot saat berhasil.
+- ✅ **Worker Control**: Pengaturan concurrency dan mode headless langsung dari UI.
+- ✅ **Backup & Restore**: Export/Import data akun via JSON dan backup database.
+- ✅ **Mobile Responsive**: UI modern dengan Dark Mode.
 
-Buat environment berikut sebelum menjalankan backend:
+## Panduan Instalasi (Lokal)
 
+### 1. Prasyarat
+- Node.js (v20+)
+- Bun (untuk Worker)
+- SQLite3
+
+### 2. Setup Dependensi
+Gunakan `Makefile` untuk instalasi cepat:
 ```bash
-APP_ADDR=:8080
-DB_PATH=./data/pusaka.db
-JWT_SECRET=change-this-jwt-secret
-ENC_KEY=0123456789abcdef0123456789abcdef
-WORKER_TOKEN=change-this-worker-token
-ACCESS_TTL_MIN=60
-REFRESH_TTL_DAYS=14
-ADMIN_USER=admin
-ADMIN_PASSWORD=admin123
+make install
+npm install  # Install tool backup di root
 ```
 
-`ENC_KEY` harus 32 karakter (AES-256 key).
-
-### Run
-
+### 3. Environment Variables (.env)
+Buat file `.env` di dalam folder `frontend/`:
 ```bash
-cd backend
-go run ./cmd/server
+ORIGIN=http://localhost:5173
+DB_PATH=../data/pusaka.db
+JWT_SECRET=rahasia-anda
+WORKER_TOKEN=token-keamanan-worker
 ```
 
-### Seeder target lokal (non-git)
-
-Untuk import banyak akun target scrape sekaligus tanpa commit ke Git:
-
-1. Buat file `backend/data/seed_targets.json` (folder `backend/data` sudah ter-ignore Git).
-2. Isi format JSON array:
-
-```json
-[
-  { "username": "197412062009032001", "password": "197412062009032001" },
-  { "username": "198312032009122005", "password": "198312032009122005" }
-]
-```
-
-3. Jalankan:
-
+### 4. Menjalankan Aplikasi
+Jalankan Frontend dan Worker secara paralel:
 ```bash
-make seed-targets
+make dev
 ```
+- UI/API: `http://localhost:5173`
+- Worker: Berjalan di background (Bun)
 
-Opsional: override file input dengan env `SEED_FILE`, contoh:
+---
 
-```bash
-SEED_FILE=./data/seed_targets_custom.json make seed-targets
-```
+## Panduan Deployment (VPS / Phusion Passenger)
 
-Seeder bersifat idempotent per NIP:
-- NIP baru akan di-insert.
-- NIP yang sudah ada akan di-update password terenkripsinya (tidak membuat duplikat).
+Aplikasi ini sudah dikonfigurasi untuk deployment di lingkungan shared hosting/VPS yang menggunakan Phusion Passenger.
 
-API utama:
+### Langkah-langkah:
+1.  **Build Frontend**:
+    ```bash
+    cd frontend && npm run build
+    ```
+2.  **Konfigurasi Passenger**:
+    - **Startup File**: `passenger_entry_point.js`
+    - **App Root**: Folder utama proyek.
+3.  **Environment**: Pastikan `NODE_ENV=production` dan semua variabel `.env` sudah diatur di panel hosting.
 
-- `POST /api/v1/auth/login`
-- `POST /api/v1/auth/refresh`
-- `POST /api/v1/auth/logout`
-- `GET /api/v1/admin/jobs`
-- `GET /api/v1/admin/jobs/stats`
-- `GET /api/v1/admin/jobs/:id`
-- `POST /api/v1/admin/jobs`
-- `POST /api/v1/admin/jobs/:id/retry`
-- `POST /api/v1/admin/jobs/retry-failed-all`
-- `GET /api/v1/admin/targets`
-- `GET /api/v1/admin/targets/:id`
-- `POST /api/v1/admin/targets`
-- `PUT /api/v1/admin/targets/:id`
-- `DELETE /api/v1/admin/targets/:id`
-- `POST /api/v1/admin/targets/:id/enqueue`
-- `POST /api/v1/admin/targets/enqueue-all`
-- `POST /api/v1/worker/jobs/claim`
-- `POST /api/v1/worker/jobs/:id/heartbeat`
-- `POST /api/v1/worker/jobs/:id/success`
-- `POST /api/v1/worker/jobs/:id/fail`
+File `passenger_entry_point.js` akan otomatis menjalankan SvelteKit dan memicu proses Worker di background.
 
-## 2) Worker (Bun + Playwright)
+---
 
-Worker membaca job dari backend, menjalankan scraper, lalu report hasil.
+## Backup & Restore Data
 
-### Environment
+Gunakan perintah `make` untuk mengelola data akun Anda:
 
-```bash
-API_BASE_URL=http://localhost:8080
-WORKER_TOKEN=change-this-worker-token
-WORKER_ID=worker-1
-CONCURRENCY=5
-HEARTBEAT=17000
-IDLE_POLL_MS=1500
-```
+| Perintah | Deskripsi |
+| :--- | :--- |
+| `make export-accounts` | Export semua user dan target scrape ke `backup/` (JSON). |
+| `make import-accounts` | Import/Restore data dari JSON terbaru ke database. |
+| `make backup-db` | Salin database SQLite utuh ke folder `backup/`. |
+| `make restore-db FILE=path` | Restore database dari file `.db` tertentu. |
 
-### Run
+---
 
-```bash
-bun install
-bun run worker:start
-```
+## Struktur Folder
 
-## 3) Frontend (SvelteKit)
+- `frontend/`: Source code SvelteKit (UI + API).
+- `src/`: Source code Worker (TypeScript).
+- `data/`: Lokasi database SQLite (diabaikan oleh Git).
+- `backup/`: Lokasi hasil export dan backup (diabaikan oleh Git).
+- `scripts/`: Script utilitas (backup/restore).
+- `passenger_entry_point.js`: Entry point khusus untuk production/Passenger.
 
-### Environment
-
-```bash
-VITE_API_BASE_URL=http://localhost:8080
-```
-
-### Run
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Route utama frontend:
-
-- `/dashboard` untuk operasional scrape (target, enqueue, retry).
-- `/reports` untuk laporan screenshot manual (mode screenshot + copy caption).
-
-## Catatan Migrasi dari PocketBase
-
-- PocketBase tidak lagi dipakai untuk orchestration.
-- Data job sekarang disimpan di SQLite backend.
-- Scraper Playwright tetap dipakai (tanpa rewrite logic scraping).
-- Model deploy yang disasar: single VPS untuk MVP.
-- Satu NIP hanya punya satu baris riwayat job (scrape terbaru menimpa data lama).
-- Retry bersifat manual lewat endpoint/admin dashboard, tidak auto-retry saat gagal.
-- Proses scrape bersifat manual (enqueue oleh user), bukan auto-scheduled.
-- Concurrency worker dibatasi maksimal 5 job paralel.
-- Pengiriman ke WhatsApp Group dilakukan manual melalui screenshot dari halaman `/reports`.
+## Lisensi
+MIT
