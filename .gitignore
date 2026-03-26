@@ -43,4 +43,6 @@ data/*.db-shm
 data/*.db-wal
 frontend/static/screenshots/
 static/screenshots/
+backup/*.json
+backup/*.db
 

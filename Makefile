@@ -1,6 +1,7 @@
 SHELL := /bin/bash
 
-.PHONY: help install install-worker install-frontend dev worker frontend clean backup-data
+.PHONY: help install install-worker install-frontend dev worker frontend clean \
+	backup-data export-accounts import-accounts backup-db restore-db
 
 help:
 	@echo "Pusaka Scraper - Unified Management"
@@ -9,7 +10,9 @@ help:
 	@echo "  make dev              - Run SvelteKit (Backend+UI) and Worker in parallel"
 	@echo "  make worker           - Run Bun worker only"
 	@echo "  make frontend         - Run SvelteKit dev server only"
-	@echo "  make backup-data      - Backup SQLite data to backup/ folder"
+	@echo "  make export-accounts  - Export users and accounts to JSON in backup/"
+	@echo "  make import-accounts  - Import users and accounts from JSON (default: latest_accounts.json)"
+	@echo "  make backup-db        - Create a full copy of SQLite database to backup/"
 	@echo "  make clean            - Remove build artifacts and temporary files"
 
 install: install-worker install-frontend
@@ -48,17 +51,33 @@ dev:
 	$(MAKE) worker & \
 	wait
 
-backup-data:
-	@echo "Creating backup..."
+# --- Backup & Restore Section ---
+
+export-accounts:
+	@node scripts/backup_restore.js export
+
+import-accounts:
+	@node scripts/backup_restore.js import $(FILE)
+
+backup-db:
 	@mkdir -p backup
 	@if [ -f data/pusaka.db ]; then \
-		sqlite3 data/pusaka.db ".mode json" "SELECT * FROM scrape_targets;" > backup/targets_backup_$(shell date +%F).json; \
-		sqlite3 data/pusaka.db ".mode json" "SELECT * FROM jobs;" > backup/jobs_backup_$(shell date +%F).json; \
-		cp data/pusaka.db backup/pusaka_$(shell date +%F).db; \
-		echo "Backup successful: backup/ folder"; \
+		cp data/pusaka.db backup/pusaka_$(shell date +%F_%H-%M-%S).db; \
+		echo "Database backed up to backup/ folder"; \
 	else \
 		echo "Error: data/pusaka.db not found"; \
 	fi
+
+restore-db:
+	@if [ -z "$(FILE)" ]; then \
+		echo "Error: Please specify FILE=path/to/backup.db"; \
+		exit 1; \
+	fi; \
+	cp $(FILE) data/pusaka.db; \
+	echo "Database restored from $(FILE)"
+
+# Alias for backward compatibility
+backup-data: export-accounts backup-db
 
 clean:
 	@echo "Cleaning up..."
