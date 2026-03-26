@@ -15,10 +15,11 @@ export async function GET({ url }) {
             COALESCE(j.jam_masuk, '') as jam_masuk,
             COALESCE(j.jam_pulang, '') as jam_pulang,
             COALESCE(j.error, '') as error,
+            COALESCE(j.screenshot, '') as screenshot,
             COALESCE(j.updated_at, '') as last_run
         FROM scrape_targets t
         LEFT JOIN (
-            SELECT nip, status, jam_masuk, jam_pulang, error, updated_at,
+            SELECT nip, status, jam_masuk, jam_pulang, error, screenshot, updated_at,
                    ROW_NUMBER() OVER (PARTITION BY nip ORDER BY updated_at DESC) as rn
             FROM jobs
         ) j ON t.nip = j.nip AND j.rn = 1

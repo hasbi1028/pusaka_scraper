@@ -46,6 +46,7 @@ export function migrate() {
             jam_masuk TEXT NOT NULL DEFAULT '',
             jam_pulang TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL,
+            screenshot TEXT NOT NULL DEFAULT '',
             retry INTEGER NOT NULL DEFAULT 0,
             error TEXT NOT NULL DEFAULT '',
             heartbeat_at DATETIME,
@@ -69,5 +70,9 @@ export function migrate() {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_unique_nip ON jobs(nip);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_unique_active_nip ON jobs(nip) WHERE status IN ('pending','running');
         CREATE INDEX IF NOT EXISTS idx_scrape_targets_nip ON scrape_targets(nip);
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
     `);
 }

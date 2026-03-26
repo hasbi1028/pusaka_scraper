@@ -1,10 +1,15 @@
 # dependencies (bun install)
 node_modules
+frontend/node_modules
 
 # output
 out
 dist
 *.tgz
+frontend/.svelte-kit
+frontend/build
+.svelte-kit/
+build/
 
 # code coverage
 coverage
@@ -12,14 +17,12 @@ coverage
 
 # logs
 logs
-_.log
+*.log
 report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # dotenv environment variable files
 .env
-.env.development.local
-.env.test.local
-.env.production.local
+.env.*.local
 .env.local
 
 # caches
@@ -33,16 +36,11 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Finder (MacOS) folder config
 .DS_Store
 
-state
-backend/data
-frontend/node_modules
-frontend/.svelte-kit
-frontend/build
+# Application Specific
+state/
+data/*.db
 data/*.db-shm
 data/*.db-wal
-node_modules/
-.svelte-kit/
-build/
-.env
-.env.local
+frontend/static/screenshots/
+static/screenshots/
 

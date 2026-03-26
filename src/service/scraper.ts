@@ -19,6 +19,7 @@ type ScrapeResult =
       tanggal: string;
       jamMasuk: string | null;
       jamPulang: string | null;
+      screenshot?: string; // Base64 string
     }
   | {
       status: "ERROR";
@@ -110,7 +111,7 @@ export async function scrapeUser(
 
   const device = {
     userAgent,
-    viewport: { width: 393, height: 1451 },
+    viewport: { width: 393, height: 800 },
     deviceScaleFactor: 2.75,
     hasTouch: true,
     permissions: ["geolocation"],
@@ -266,12 +267,33 @@ export async function scrapeUser(
     log(nip, "Data extracted successfully", { tanggal, jamMasuk, jamPulang });
     onProgress?.();
 
+    // =======================
+    // TAKE SCREENSHOT (Full Viewport)
+    // =======================
+    let scBase64 = "";
+    try {
+      // Pastikan elemen data sudah benar-benar ada
+      await page.waitForSelector("div.bg-slate-50", { state: "visible", timeout: 5000 });
+      await humanDelay(500, 1000);
+      
+      // Ambil screenshot dengan timeout yang lebih pendek (10 detik)
+      const buffer = await page.screenshot({ 
+        type: "jpeg", 
+        quality: 60,
+        timeout: 10000 
+      });
+      scBase64 = buffer.toString("base64");
+    } catch (e) {
+      logError(nip, "Failed to take viewport screenshot", e);
+    }
+
     return {
       status: "OK",
       nip,
       tanggal,
       jamMasuk,
       jamPulang,
+      screenshot: scBase64,
     };
   } catch (e: any) {
     logError(nip, "Uncaught scraping exception", e);

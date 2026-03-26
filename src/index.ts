@@ -128,6 +128,7 @@ async function runJob(job: ClaimedJob) {
           jam_masuk: result.jamMasuk || "",
           jam_pulang: result.jamPulang || "",
           duration_ms: Date.now() - start,
+          screenshot: result.screenshot || "",
         }),
       });
 
